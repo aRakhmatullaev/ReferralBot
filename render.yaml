@@ -6,4 +6,4 @@ services:
     startCommand: python bot.py
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.10x
+        value: 3.12.2
