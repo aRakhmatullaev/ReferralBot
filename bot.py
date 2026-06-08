@@ -5,7 +5,8 @@ from datetime import datetime
 import pandas as pd
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
-
+from aiogram.filters import CommandStart, CommandObject
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, \
@@ -42,7 +43,7 @@ def load_db() -> pd.DataFrame:
 
     if os.path.exists(EXCEL_FILE):
         try:
-            # We explicitly force text columns to prevent pandas from guessing numbers
+            # Ustunlar turini majburlaymiz, 'Is Subscribed' va 'Is Registered' ni object qilamiz
             df = pd.read_excel(
                 EXCEL_FILE,
                 dtype={
@@ -51,7 +52,9 @@ def load_db() -> pd.DataFrame:
                     'Referred By': str,
                     'Username': str,
                     'Full Name': str,
-                    'Rank': str
+                    'Rank': str,
+                    'Is Subscribed': object,  # Istalgan turni (bool yoki int) olishi uchun
+                    'Is Registered': object   # Istalgan turni (bool yoki int) olishi uchun
                 }
             )
             # Ensure Points is always an integer numeric type
@@ -64,15 +67,15 @@ def load_db() -> pd.DataFrame:
             logging.error(f"Error loading Excel file, recreating it: {e}")
             pass
 
-    # Create fresh empty DataFrame structure explicitly cast as object/string text types
+    # Yangi fayl yaratilayotganda ham ularni object sifatida e'lon qilamiz
     df = pd.DataFrame(columns=columns)
     df = df.astype({
         'User ID': str, 'Username': str, 'Full Name': str, 'Phone': str,
-        'Points': int, 'Referred By': str, 'Rank': str
+        'Points': int, 'Referred By': str, 'Rank': str,
+        'Is Subscribed': object, 'Is Registered': object
     })
     df.to_excel(EXCEL_FILE, index=False)
     return df
-
 def save_db(df: pd.DataFrame):
     df.to_excel(EXCEL_FILE, index=False)
 
@@ -194,6 +197,7 @@ async def audit_and_sort_excel():
 @dp.callback_query(F.data == "verify_sub")
 async def check_subscription_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
+    user_id_str = str(user_id)
     is_active = await is_subscribed(user_id)
 
     if not is_active:
@@ -210,14 +214,48 @@ async def check_subscription_callback(callback: CallbackQuery):
     except Exception:
         pass
 
-    contact_keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True
-    )
+    df = load_db()
+    df["User ID"] = df["User ID"].astype(str)
 
+    if user_id_str in df["User ID"].values:
+        idx = df[df["User ID"] == user_id_str].index[0]
+
+        # Agar oldin ro'yxatdan o'tmagan bo'lsagina ball tizimini ishga tushiramiz
+        if not (str(df.at[idx, "Is Registered"]).upper() == "TRUE" or df.at[idx, "Is Registered"] is True):
+            df.at[idx, "Is Subscribed"] = True
+            df.at[idx, "Is Registered"] = True
+
+            # Taklif qilgan odamga ball qo'shish
+            referrer_id_str = str(df.at[idx, "Referred By"]).strip()
+            if referrer_id_str and referrer_id_str != "nan" and referrer_id_str != "":
+                if referrer_id_str in df["User ID"].values:
+                    ref_idx = df[df["User ID"] == referrer_id_str].index[0]
+                    current_points = df.at[ref_idx, "Points"]
+                    df.at[ref_idx, "Points"] = int(current_points if pd.notna(current_points) else 0) + 1
+                    try:
+                        await bot.send_message(
+                            chat_id=int(referrer_id_str),
+                            text="🎉 <b>Yangi referal!</b> Doʻstingiz roʻyxatdan oʻtdi va sizga 1 ball taqdim etildi!",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+            save_db(df)
+
+    bot_username = (await bot.get_me()).username
+    referral_link = f"https://t.me/{bot_username}?start={user_id_str}"
     await callback.message.answer(
-        "✅ Obuna tasdiqlandi!\n\nRoʻyxatdan oʻtishni yakunlash uchun pastdaging tugma orqali telefon raqamingizni yuboring:",
-        reply_markup=contact_keyboard
+        f"🎉 Roʻyxatdan oʻtish muvaffaqiyatli yakunlandi! Konkursda ishtirok etayotganingizdan xursandmiz. \n\n"
+        f"Join our private <a href='https://t.me/+VdugUXO1awZlY2My'> hiking community </a> to touch some grass. ",
+        reply_markup=get_main_keyboard(callback.from_user.id),
+        parse_mode="HTML"
+    )
+    await callback.message.answer(
+        f"Sizning shaxsiy referal havolangiz:\n"
+        f"🔗 <code>{referral_link}</code>\n\n"
+        f"Ushbu havolani doʻstlaringizga ulashing va ball yigʻing!",
+        reply_markup=get_main_keyboard(callback.from_user.id),
+        parse_mode="HTML"
     )
 # --- Bot Handlers ---
 @dp.message(CommandStart())
@@ -253,7 +291,7 @@ async def start_cmd(message: Message, command: CommandObject):
             "User ID": user_id_str,
             "Username": username,
             "Full Name": name,
-            "Phone": "",
+            "Phone": "",  # Bu bo'sh qoladi
             "Points": 0,
             "Referred By": str(referrer_id) if referrer_id else "",
             "Is Subscribed": False,
@@ -266,7 +304,6 @@ async def start_cmd(message: Message, command: CommandObject):
     # 1. Obuna boʻlganligini tekshirish
     if not await is_subscribed(message.from_user.id):
         builder = InlineKeyboardBuilder()
-        # Kanalingiz ssilkasi (Username qismini oʻzgartiring)
         builder.row(InlineKeyboardButton(text="📢 Kanalga aʼzo boʻlish", url="https://t.me/+ZaTAGLEkJwVmZGIy"))
         builder.row(InlineKeyboardButton(text="🔄 Obunani tekshirish", callback_data="verify_sub"))
 
@@ -274,36 +311,49 @@ async def start_cmd(message: Message, command: CommandObject):
             "👋 Xush kelibsiz! SAT va Cambridge matematika materiallari ulashiladigan hamda foydali kurslar boʻlib oʻtadigan kanalimizning maxsus konkurs botiga xush kelibsiz.\n\n"
             "Konkursda qatnashish uchun dastlab rasmiy kanalimizga aʼzo boʻlishingiz lozim. "
             "Kanalga qoʻshilib, pastdagi tekshirish tugmasini bosing!",
-            reply_markup=builder.as_markup(), parse_mode="HTML"
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
         )
         return
 
-    # 2. Obunadan oʻtgan boʻlsa, kontakt soʻrash
-    contact_keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True
-    )
-    await message.answer(
-        "👋 Xush kelibsiz! SAT va Cambridge matematika materiallari ulashiladigan hamda foydali kurslar boʻlib oʻtadigan kanalimizning maxsus konkurs botiga xush kelibsiz.\n\n"
-        "Quyidagi tugmalar orqali oʻz referal havolangizni oling, doʻstlaringizni taklif qiling va ball yigʻib, reytingda gʻolib boʻling!\n\n"
-        "👇 Konkursni boshlash uchun pastdagi tugma orqali telefon raqamingizni yuboring:",
-        reply_markup=contact_keyboard
-    )
+    # 2. Agar foydalanuvchi allaqachon kanalga a'zo bo'lsa (Telefon raqamsiz to'g'ridan-to'g'ri ro'yxatdan o'tkazish)
+    idx = df[df["User ID"] == user_id_str].index[0]
+    df.at[idx, "Is Subscribed"] = True
+    df.at[idx, "Is Registered"] = True
 
-    # 2. ✅ If they pass verification, drop the native contact collector request
-    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-    contact_keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Share Contact", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
+    # Taklif qilgan odamga ball berish mantiqi
+    referrer_id_str = str(df.at[idx, "Referred By"]).strip()
+    if referrer_id_str and referrer_id_str != "nan" and referrer_id_str != "":
+        if referrer_id_str in df["User ID"].values:
+            ref_idx = df[df["User ID"] == referrer_id_str].index[0]
+            current_points = df.at[ref_idx, "Points"]
+            df.at[ref_idx, "Points"] = int(current_points if pd.notna(current_points) else 0) + 1
+            try:
+                await bot.send_message(
+                    chat_id=int(referrer_id_str),
+                    text="🎉 <b>Yangi referal!</b> Doʻstingiz roʻyxatdan oʻtdi va sizga 1 ball taqdim etildi!",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
 
+    save_db(df)
+
+    bot_username = (await bot.get_me()).username
+    referral_link = f"https://t.me/{bot_username}?start={user_id_str}"
     await message.answer(
-        "✅ <b>Subscription verified!</b>\n\nPlease share your phone number using the button below to finalize registration:",
-        reply_markup=contact_keyboard,
+        f"🎉 Roʻyxatdan oʻtish muvaffaqiyatli yakunlandi! Konkursda ishtirok etayotganingizdan xursandmiz. \n\n"
+        f"Join our private <a href='https://t.me/+VdugUXO1awZlY2My'> hiking community </a> to touch some grass. ",
+        reply_markup=get_main_keyboard(message.from_user.id),
         parse_mode="HTML"
     )
-
+    await message.answer(
+        f"Sizning shaxsiy referal havolangiz:\n"
+        f"🔗 <code>{referral_link}</code>\n\n"
+        f"Ushbu havolani doʻstlaringizga ulashing. Har bir roʻyxatdan oʻtgan doʻstingiz uchun sizga <b>1 ball</b> beriladi!",
+        reply_markup=get_main_keyboard(message.from_user.id),
+        parse_mode="HTML"
+    )
 @dp.callback_query(F.data == "check_sub")
 async def check_sub_cb(callback_query):
     user_id = callback_query.from_user.id
@@ -377,6 +427,15 @@ async def handle_contact(message: Message):
         reply_markup=get_main_keyboard(message.from_user.id),
         parse_mode = "HTML"
     )
+    bot_username = "Math_konkurs_bot"
+    referral_link = f"https://t.me/{bot_username}?start={user_id_str}"
+    await message.answer(
+        f"Sizning shaxsiy referal havolangiz:\n"
+        f"🔗 <code>{referral_link}</code>\n\n"
+        f"Ushbu havolani nusxalab, doʻstlaringizga ulashing. Har bir roʻyxatdan oʻtgan doʻstingiz uchun sizga <b>1 ball</b> taqdim etiladi!",
+        reply_markup=get_main_keyboard(message.from_user.id),
+        parse_mode="HTML"
+    )
 
 # Change this line:
 @dp.message(F.text == "👤 Profile")
@@ -421,7 +480,7 @@ async def show_leaderboard(message: Message):
 
     text_lines = [
         f"🏆 <b>Top ishtirokchilar (Top 10)</b>",
-        f"<i>Oxirgi yangilanish: {last_sorted_time} (Har soatda yangilanadi)</i>\n"
+        f"<i>Oxirgi yangilanish: {last_sorted_time} (Har daqiqada yangilanadi)</i>\n"
     ]
 
     for entry in cached_top_10:
@@ -432,25 +491,28 @@ async def show_leaderboard(message: Message):
 
 # --- Admin Operations ---
 @dp.message(F.text == "📋 Admin Panel")
-async def admin_panel(message: Message):
-    if message.from_user.id not in ADMIN_IDS: return
+async def admin_panel_cmd(message: Message):
+    # Verify the user is an authorized admin
+    if message.from_user.id not in ADMIN_IDS:
+        return
 
-    df = load_db()
-    output = ["📋 <b>LOCAL DATABASE RECORD ENGINE LOG</b>\n"]
+    # Create a clean admin layout keyboard
+    admin_keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📢 Broadcast Message")],
+            [KeyboardButton(text="📊 View Database Stats"), KeyboardButton(text="📋 Local Database Log")]
+        ],
+        resize_keyboard=True
+    )
 
-    for idx, row in df.iterrows():
-        if str(row["Is Registered"]).upper() == "TRUE" or row["Is Registered"] is True:
-            output.append(
-                f"ID: <code>{row['User ID']}</code> | Name: {row['Full Name']} | User: @{row['Username']} | Phone: {row['Phone']} | Points: {row['Points']}")
+    await message.answer(
+        "🛠️ <b>Welcome to the Admin Control Panel</b>\n\n"
+        "Select an action from the menu below to manage your referral system:",
+        reply_markup=admin_keyboard,
+        parse_mode="HTML"
+    )
 
-    full_text = "\n".join(output)
-    if len(full_text) > 4000:
-        for x in range(0, len(full_text), 4000):
-            await message.answer(full_text[x:x + 4000], parse_mode="HTML")
-    else:
-        await message.answer(full_text, parse_mode="HTML")
-
-
+# --- TRIGGER BROADCAST STATE ---
 @dp.message(F.text == "📢 Broadcast")
 async def start_broadcast(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
@@ -471,21 +533,36 @@ async def process_broadcast(message: Message, state: FSMContext):
     success, fail = 0, 0
 
     for _, row in df.iterrows():
-        if str(row["Is Registered"]).upper() == "TRUE" or row["Is Registered"] is True:
+        # Safeguard against completely empty rows
+        if pd.isna(row.get("User ID")) or pd.isna(row.get("Is Registered")):
+            continue
+
+        # Convert the value to a clean string to bypass the shifted Excel column mess
+        is_reg_val = str(row["Is Registered"]).strip().upper()
+
+        # BROAD VALIDATION: Send to anyone unless it's explicitly 0, FALSE, or empty
+        if is_reg_val not in ["0", "0.0", "FALSE", "NAN", ""]:
             try:
-                await message.copy_to(chat_id=int(row["User ID"]))
+                # Convert float strings like "5260506311.0" safely to integer IDs
+                chat_id = int(float(str(row["User ID"])))
+
+                await message.copy_to(chat_id=chat_id)
                 success += 1
-                await asyncio.sleep(0.05)
-            except Exception:
+                await asyncio.sleep(0.05)  # Anti-flood delay
+            except Exception as e:
+                logging.error(f"Failed to send to {row.get('User ID')}: {e}")
                 fail += 1
 
-    await status_msg.edit_text(f"📢 <b>Broadcast Execution Summary:</b>\n\n✅ Delivered: {success}\n❌ Failed: {fail}",
-                               parse_mode="HTML")
-
+    await status_msg.edit_text(
+        f"📢 <b>Broadcast Execution Summary:</b>\n\n"
+        f"✅ Delivered: {success}\n"
+        f"❌ Failed: {fail}",
+        parse_mode="HTML"
+    )
 
 async def main():
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(audit_and_sort_excel, 'interval', minutes=60)
+    scheduler.add_job(audit_and_sort_excel, 'interval', minutes=1)
     scheduler.start()
 
     await audit_and_sort_excel()
