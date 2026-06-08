@@ -267,7 +267,7 @@ async def start_cmd(message: Message, command: CommandObject):
     if not await is_subscribed(message.from_user.id):
         builder = InlineKeyboardBuilder()
         # Kanalingiz ssilkasi (Username qismini oʻzgartiring)
-        builder.row(InlineKeyboardButton(text="📢 Kanalga aʼzo boʻlish", url="https://t.me/Nizomiddinsblog"))
+        builder.row(InlineKeyboardButton(text="📢 Kanalga aʼzo boʻlish", url="https://t.me/+ZaTAGLEkJwVmZGIy"))
         builder.row(InlineKeyboardButton(text="🔄 Obunani tekshirish", callback_data="verify_sub"))
 
         await message.answer(
